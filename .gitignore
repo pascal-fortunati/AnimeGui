@@ -9,6 +9,9 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 
+# Outils externes (trop volumineux - à installer localement)
+tools/
+
 # Tauri
 src-tauri/target/
 src-tauri/gen/
