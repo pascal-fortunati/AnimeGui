@@ -2,8 +2,6 @@
   <img src="src/assets/logo_up.png" alt="AnimeGui Logo" width="500">
 </div>
 
-# AnimeGui - Upscaleur & Encodeur Vidéo IA
-
 Application de bureau puissante pour upscaler et encoder des vidéos et du contenu anime avec l'IA, construite avec Tauri, React et Rust.
 
 [Version: 0.1.0] [Licence: MIT] [Plateforme: Windows]
