@@ -1,0 +1,70 @@
+# Bun
+node_modules/
+bun.lockb
+*.bun
+
+# Rust/Cargo
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+dist/
+dist-ssr/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.code-workspace
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Application generated files
+temp_jobs/
+outputs/
+stdout.txt
+stderr.txt
+*.log
+
+# Preview/state files
+*.db
+.animegui-*
+
+# Build outputs
+/build/
+*.dmg
+*.app/
+*.exe
+*.msi
+*.deb
+*.AppImage
+
+# Cache
+.cache/
+.eslintcache
+
+# Temporary files
+*.tmp
+*.temp
+.~*
+
+# Local configuration
+user_ocr_replacements.json.local
+
+# Debug
+debug/
+.gdbinit
