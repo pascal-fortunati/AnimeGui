@@ -39,6 +39,7 @@ Thumbs.db
 # Application generated files
 temp_jobs/
 outputs/
+dvd_subtitles/
 stdout.txt
 stderr.txt
 *.log

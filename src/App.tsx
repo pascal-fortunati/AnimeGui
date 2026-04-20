@@ -483,51 +483,88 @@ export function App() {
           onApplyCurrentSettings={async (jobId) => {
             try {
               const targetJob = jobs.find((job) => job.id === jobId);
-              const preservedManualCrop = targetJob?.settings.manual_crop;
-              const manualCropForJob =
-                settings.manual_crop ?? preservedManualCrop;
-              const preservedAudioSelection =
-                targetJob?.settings.selected_audio_stream_index;
-              const preservedSubtitleSelection =
-                targetJob?.settings.selected_subtitle_stream_index;
-              const preservedCopyAudio = targetJob?.settings.copy_audio;
-              const preservedCopySubs = targetJob?.settings.copy_subs;
-              const preservedSubtitleFormat =
-                targetJob?.settings.subtitle_output_format;
-              const safeSettings = sanitizeProcessingSettings({
-                ...settings,
-                manual_crop: manualCropForJob,
-                auto_crop: manualCropForJob ? false : settings.auto_crop,
-                selected_audio_stream_index: preservedAudioSelection,
-                selected_subtitle_stream_index: preservedSubtitleSelection,
-                copy_audio: preservedCopyAudio ?? settings.copy_audio,
-                copy_subs: preservedCopySubs ?? settings.copy_subs,
-                subtitle_output_format:
-                  preservedSubtitleFormat ?? settings.subtitle_output_format,
-                preview_session_id:
-                  targetJob?.settings.preview_session_id ??
-                  settings.preview_session_id ??
-                  `job-preview-${jobId}`,
-                preview_last_frame_index:
-                  targetJob?.settings.preview_last_frame_index ??
-                  settings.preview_last_frame_index,
-              });
+              const buildSafeSettingsForJob = (job: QueueJob | undefined) => {
+                const isNonEmpty = (value: string | undefined): value is string =>
+                  typeof value === "string" && value.trim().length > 0;
+
+                const preservedManualCrop = isNonEmpty(job?.settings.manual_crop)
+                  ? job?.settings.manual_crop
+                  : undefined;
+                const requestedManualCrop = isNonEmpty(settings.manual_crop)
+                  ? settings.manual_crop
+                  : undefined;
+                const manualCropForJob = requestedManualCrop ?? preservedManualCrop;
+                const preservedAudioSelection =
+                  job?.settings.selected_audio_stream_index;
+                const preservedSubtitleSelection =
+                  job?.settings.selected_subtitle_stream_index;
+                const preservedCopyAudio = job?.settings.copy_audio;
+                const preservedCopySubs = job?.settings.copy_subs;
+                const preservedSubtitleFormat =
+                  job?.settings.subtitle_output_format;
+                const preservedPreviewSessionId = isNonEmpty(
+                  job?.settings.preview_session_id,
+                )
+                  ? job?.settings.preview_session_id
+                  : undefined;
+                const preservedExternalSrtPath = isNonEmpty(
+                  job?.settings.external_srt_path,
+                )
+                  ? job?.settings.external_srt_path
+                  : undefined;
+                const requestedExternalSrtPath = isNonEmpty(
+                  settings.external_srt_path,
+                )
+                  ? settings.external_srt_path
+                  : undefined;
+                const externalSrtForJob =
+                  preservedExternalSrtPath ?? requestedExternalSrtPath;
+                const hasExternalSrt = Boolean(externalSrtForJob);
+
+                return sanitizeProcessingSettings({
+                  ...settings,
+                  manual_crop: manualCropForJob,
+                  auto_crop: manualCropForJob ? false : settings.auto_crop,
+                  selected_audio_stream_index: preservedAudioSelection,
+                  selected_subtitle_stream_index: hasExternalSrt
+                    ? undefined
+                    : preservedSubtitleSelection,
+                  copy_audio: preservedCopyAudio ?? settings.copy_audio,
+                  copy_subs: hasExternalSrt
+                    ? false
+                    : (preservedCopySubs ?? settings.copy_subs),
+                  subtitle_output_format:
+                    hasExternalSrt
+                      ? "copy"
+                      : (preservedSubtitleFormat ?? settings.subtitle_output_format),
+                  preview_session_id:
+                    preservedPreviewSessionId ??
+                    settings.preview_session_id ??
+                    `job-preview-${jobId}`,
+                  preview_last_frame_index:
+                    job?.settings.preview_last_frame_index ??
+                    settings.preview_last_frame_index,
+                  external_srt_path: externalSrtForJob,
+                });
+              };
+
+              const safeSettings = buildSafeSettingsForJob(targetJob);
               setSettings(safeSettings);
               const batchSessionId = targetJob?.settings.preview_session_id;
               const batchJobs = batchSessionId
                 ? jobs.filter(
-                    (job) =>
-                      job.settings.preview_session_id === batchSessionId &&
-                      (job.status === "waiting" ||
-                        job.status === "paused" ||
-                        job.status === "error" ||
-                        job.status === "canceled"),
-                  )
+                  (job) =>
+                    job.settings.preview_session_id === batchSessionId &&
+                    (job.status === "waiting" ||
+                      job.status === "paused" ||
+                      job.status === "error" ||
+                      job.status === "canceled"),
+                )
                 : [];
               if (batchJobs.length > 1) {
                 await Promise.all(
                   batchJobs.map((job) =>
-                    updateJobSettings(job.id, safeSettings),
+                    updateJobSettings(job.id, buildSafeSettingsForJob(job)),
                   ),
                 );
                 appendLocalLog(

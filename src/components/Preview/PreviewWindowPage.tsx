@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { listen } from "@tauri-apps/api/event";
 import {
   addJob,
   analyzeFile,
@@ -40,9 +41,23 @@ interface PreviewContext {
   previewId?: string;
   jobId?: string;
   srtPath?: string;
+  srtByInputPath?: Record<string, string>;
   audioSelection?: string;
   subtitleSelection?: string;
   previewWindowLabel?: string;
+}
+
+function resolveExternalSrtForInput(
+  ctx: PreviewContext,
+  inputPath: string,
+): string | undefined {
+  if (ctx.srtByInputPath && ctx.srtByInputPath[inputPath]) {
+    return ctx.srtByInputPath[inputPath];
+  }
+  if (ctx.srtPath) {
+    return ctx.srtPath;
+  }
+  return undefined;
 }
 
 // Presset de Crop
@@ -345,7 +360,8 @@ export function PreviewWindowPage() {
         );
         // Chargement des options de copie des sous-titres
         // Si on a un SRT exporté du DVD, désactiver la copie des sous-titres
-        const finalSubtitleSelection = ctx.srtPath
+        const activeExternalSrt = resolveExternalSrtForInput(ctx, ctx.inputPath);
+        const finalSubtitleSelection = activeExternalSrt
           ? "external_srt"
           : ctx.subtitleSelection ??
           (settings.copy_subs
@@ -380,7 +396,7 @@ export function PreviewWindowPage() {
     loadContextFromStorage();
 
     // Recharger le contexte quand la fenêtre redevient visible
-    // (après retour du DVD window)
+    // (après retour du DVD window) ou quand le localStorage change
     const appWindow = getCurrentWindow();
     const unlistenFocus = appWindow.onFocusChanged(({ payload: focused }) => {
       if (focused) {
@@ -388,8 +404,45 @@ export function PreviewWindowPage() {
       }
     });
 
+    // Écouter les changements de localStorage (pour le SRT exporté du DVD)
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === "animegui-preview-context") {
+        loadContextFromStorage();
+      }
+    };
+    window.addEventListener("storage", handleStorageChange);
+
+    const unlistenDvdExport = listen<{ srtPath?: string; inputPath?: string }>("dvd-srt-exported", ({ payload }) => {
+      if (payload?.srtPath) {
+        try {
+          const raw = localStorage.getItem("animegui-preview-context");
+          if (raw) {
+            const ctx = JSON.parse(raw) as PreviewContext;
+            const updated: PreviewContext = {
+              ...ctx,
+              srtPath: payload.srtPath,
+              srtByInputPath: {
+                ...(ctx.srtByInputPath ?? {}),
+                ...(payload.inputPath ? { [payload.inputPath]: payload.srtPath } : {}),
+              },
+            };
+            localStorage.setItem("animegui-preview-context", JSON.stringify(updated));
+          }
+        } catch {
+          // ignore storage update errors
+        }
+      }
+
+      loadContextFromStorage();
+      void appWindow.unminimize();
+      void appWindow.show();
+      void appWindow.setFocus();
+    });
+
     return () => {
       void unlistenFocus.then((f) => f());
+      window.removeEventListener("storage", handleStorageChange);
+      void unlistenDvdExport.then((f) => f());
     };
   }, []);
 
@@ -731,10 +784,17 @@ export function PreviewWindowPage() {
     ];
   }, [analysis]);
 
+  const activeExternalSrt = useMemo(() => {
+    if (!context?.inputPath) {
+      return undefined;
+    }
+    return resolveExternalSrtForInput(context, context.inputPath);
+  }, [context]);
+
   const subtitleOptions = useMemo(() => {
     // Si on a un SRT externe (du DVD OCR), l'afficher en premier
-    if (context?.srtPath) {
-      const srtFilename = context.srtPath.split("\\").pop() || context.srtPath;
+    if (activeExternalSrt) {
+      const srtFilename = activeExternalSrt.split("\\").pop() || activeExternalSrt;
       return [
         { value: "external_srt", label: `✓ SRT: ${srtFilename}` },
       ];
@@ -754,7 +814,7 @@ export function PreviewWindowPage() {
         label: `#${t.stream_index} ${t.language ?? "und"} ${t.codec ?? "sub"}${t.title ? ` - ${t.title}` : ""}${t.is_default ? " (default)" : ""}`,
       })),
     ];
-  }, [analysis, context?.srtPath]);
+  }, [analysis, activeExternalSrt]);
 
   // Calcul des positions des lignes de crop
   const leftPx =
@@ -799,24 +859,26 @@ export function PreviewWindowPage() {
           : `crop=${rawCrop}`
         : undefined;
 
-      // Si on revient de DVD avec un SRT exporté, utiliser ce SRT au lieu de copier les sous-titres
-      const hasSrtFromDvd = context.srtPath;
+      const selectedSubtitleStreamIndex =
+        keepSubs && /^\d+$/.test(subtitleSelection)
+          ? Number(subtitleSelection)
+          : undefined;
+
       const finalSettings: ProcessingSettings & { external_srt_path?: string } = {
         ...context.settings,
         auto_crop: false,
         manual_crop: cropForSave,
         preview_last_frame_index: frameIndex,
         copy_audio: keepAudio,
-        copy_subs: hasSrtFromDvd ? false : keepSubs,
+        copy_subs: keepSubs,
         selected_audio_stream_index:
           keepAudio && audioSelection !== "all"
             ? Number(audioSelection)
             : undefined,
-        selected_subtitle_stream_index:
-          keepSubs && singleSub && !hasSrtFromDvd ? Number(subtitleSelection) : undefined,
+        selected_subtitle_stream_index: selectedSubtitleStreamIndex,
         subtitle_output_format:
-          keepSubs && singleSub && !hasSrtFromDvd ? subtitleOutputFormat : "copy",
-        external_srt_path: hasSrtFromDvd ? context.srtPath : undefined,
+          keepSubs && singleSub ? subtitleOutputFormat : "copy",
+        external_srt_path: undefined,
       };
 
       if (keepSubs && shouldOpenDvdSubtitleWindow) {
@@ -860,10 +922,34 @@ export function PreviewWindowPage() {
       }
 
       if (context.jobId) {
-        await updateJobSettings(context.jobId, finalSettings);
+        const externalSrt = resolveExternalSrtForInput(context, context.inputPath);
+        const settingsForJob = {
+          ...finalSettings,
+          external_srt_path: externalSrt,
+          copy_subs: externalSrt ? false : finalSettings.copy_subs,
+          selected_subtitle_stream_index: externalSrt
+            ? undefined
+            : finalSettings.selected_subtitle_stream_index,
+          subtitle_output_format: externalSrt
+            ? "copy"
+            : finalSettings.subtitle_output_format,
+        };
+        await updateJobSettings(context.jobId, settingsForJob);
       } else {
         for (const path of batchTargets) {
-          await addJob(path, finalSettings);
+          const externalSrt = resolveExternalSrtForInput(context, path);
+          const settingsForPath = {
+            ...finalSettings,
+            external_srt_path: externalSrt,
+            copy_subs: externalSrt ? false : finalSettings.copy_subs,
+            selected_subtitle_stream_index: externalSrt
+              ? undefined
+              : finalSettings.selected_subtitle_stream_index,
+            subtitle_output_format: externalSrt
+              ? "copy"
+              : finalSettings.subtitle_output_format,
+          };
+          await addJob(path, settingsForPath);
         }
       }
 

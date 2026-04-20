@@ -169,6 +169,16 @@ fn ocr_cache_path(images_dir: &Path) -> PathBuf {
     images_dir.join(".ocr_images_cache.json")
 }
 
+fn ocr_images_dir_for_idx(output_dir: &Path, idx_path: &Path) -> PathBuf {
+    let stem = idx_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.replace(' ', "_"))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "track".to_string());
+    output_dir.join("ocr_images").join(stem)
+}
+
 fn write_ocr_images_cache(images_dir: &Path, cache: &DvdOcrImagesCache) -> Result<(), String> {
     let path    = ocr_cache_path(images_dir);
     let payload = serde_json::to_string(cache)
@@ -280,11 +290,32 @@ fn apply_user_ocr_replacements(text: &str, map: &HashMap<String, String>) -> Str
     pairs.sort_by(|(a, _), (b, _)| b.len().cmp(&a.len())); // longest first
     let mut out = text.to_string();
     for (pattern, replacement) in pairs {
-        if !pattern.trim().is_empty() {
+        if !pattern.trim().is_empty() && !is_risky_single_char_letter_swap(pattern, replacement) {
             out = out.replace(pattern.as_str(), replacement.as_str());
         }
     }
     out
+}
+
+fn is_risky_single_char_letter_swap(pattern: &str, replacement: &str) -> bool {
+    let mut p = pattern.chars();
+    let mut r = replacement.chars();
+    let Some(pc) = p.next() else { return false; };
+    let Some(rc) = r.next() else { return false; };
+    if p.next().is_some() || r.next().is_some() {
+        return false;
+    }
+    pc.is_alphabetic() && rc.is_alphabetic()
+}
+
+fn is_safe_single_char_ocr_swap(src: char, dst: char) -> bool {
+    let src_alnum = src.is_ascii_alphanumeric();
+    let dst_alnum = dst.is_ascii_alphanumeric();
+    // Keep only classic OCR confusions (digit/letter and punctuation-like glyphs).
+    (src.is_ascii_digit() && dst.is_ascii_alphabetic())
+        || (src.is_ascii_alphabetic() && dst.is_ascii_digit())
+        || (!src_alnum && dst_alnum)
+        || (src_alnum && !dst_alnum)
 }
 
 /// Extract character-level changes from corrected text and learn them.
@@ -310,13 +341,12 @@ fn auto_learn_from_correction(
                 // Single character change detected
                 let pattern = o.to_string();
                 let replacement = c.to_string();
-                // Only learn if it's a common OCR mistake (not random)
-                if !pattern.chars().next().unwrap_or(' ').is_numeric() || 
-                   !replacement.chars().next().unwrap_or(' ').is_alphabetic() {
-                    // Learn the mapping (but be cautious)
-                    if pattern.len() == 1 && replacement.len() == 1 {
-                        map.insert(pattern, replacement);
-                    }
+                // Learn only safe OCR confusions to avoid poisoning accent substitutions.
+                if pattern.len() == 1
+                    && replacement.len() == 1
+                    && is_safe_single_char_ocr_swap(o, c)
+                {
+                    map.insert(pattern, replacement);
                 }
             }
         }
@@ -506,15 +536,26 @@ fn run_tesseract_text(
         cmd.arg(image_path)
             .arg("stdout")
             .args(["-l", language, "--oem", "1", "--psm", psm,
-                   "-c", "preserve_interword_spaces=1"]);
+                   "-c", "preserve_interword_spaces=1",
+                   "-c", "load_system_dawg=0",
+                   "-c", "load_freq_dawg=0"]);
         if let Some(uw) = user_words_path {
             cmd.arg("--user-words").arg(uw);
         }
 
-        let out = cmd.output()
-            .map_err(|e| format!("Échec exécution tesseract (text psm={psm}): {e}"))?;
+        let out = match cmd.output() {
+            Ok(o) => o,
+            Err(e) => {
+                last_error = format!("Échec exécution tesseract (text psm={psm}): {e}");
+                continue;
+            }
+        };
+        
+        // Check for crash signals (abnormal exit codes)
         if !out.status.success() {
-            last_error = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let stderr_msg = String::from_utf8_lossy(&out.stderr);
+            last_error = stderr_msg.trim().to_string();
+            // Skip this PSM and try the next one instead of crashing
             continue;
         }
 
@@ -554,10 +595,16 @@ fn run_tesseract_confidence(
         cmd.arg("--user-words").arg(uw);
     }
 
-    let out = cmd.output()
-        .map_err(|e| format!("Échec exécution tesseract (tsv): {e}"))?;
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            return Err(format!("Échec exécution tesseract (tsv): {e}"));
+        }
+    };
+    
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        let stderr_msg = String::from_utf8_lossy(&out.stderr);
+        return Err(stderr_msg.trim().to_string());
     }
 
     let tsv = String::from_utf8_lossy(&out.stdout);
@@ -913,7 +960,7 @@ async fn start_dvd_ocr(
     }
 
     let output_dir  = PathBuf::from(&request.output_dir);
-    let images_dir  = output_dir.join("ocr_images");
+    let images_dir  = ocr_images_dir_for_idx(&output_dir, &idx_path);
     std::fs::create_dir_all(&images_dir)
         .map_err(|e| format!("Impossible de créer le dossier images OCR: {e}"))?;
 
@@ -978,7 +1025,7 @@ async fn load_dvd_sub_images(request: DvdOcrStartRequest) -> Result<DvdOcrStartR
     }
 
     let output_dir = PathBuf::from(&request.output_dir);
-    let images_dir = output_dir.join("ocr_images");
+    let images_dir = ocr_images_dir_for_idx(&output_dir, &idx_path);
     std::fs::create_dir_all(&images_dir)
         .map_err(|e| format!("Impossible de créer le dossier images OCR: {e}"))?;
 

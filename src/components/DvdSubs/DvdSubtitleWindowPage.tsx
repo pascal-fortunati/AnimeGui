@@ -4,12 +4,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import { Progress } from "../ui/progress";
 import {
   exportDvdOcrSrt,
   extractDvdSubtitleTracks,
   loadDvdSubImages,
   listOcrUserReplacements,
   recordOcrCorrection,
+  upsertOcrUserReplacement,
   resolveVideoInputs,
   scanDvdSubtitleTracks,
   startDvdOcr,
@@ -27,6 +29,8 @@ interface DvdSubsContext {
   subtitleSelection?: string;
   settings?: Record<string, any>;
   previewWindowLabel?: string;
+  srtPath?: string;
+  srtByInputPath?: Record<string, string>;
 }
 
 interface DvdOcrProgressEvent {
@@ -133,6 +137,10 @@ function readStoredContext(): DvdSubsContext {
   }
 }
 
+function trackKey(inputPath: string, streamIndex: number): string {
+  return `${inputPath}::${streamIndex}`;
+}
+
 export function DvdSubtitleWindowPage() {
   const appWindow = getCurrentWindow();
   const [dvdSubsContext, setDvdSubsContext] = useState<DvdSubsContext | null>(null);
@@ -148,7 +156,9 @@ export function DvdSubtitleWindowPage() {
   const [ocrCompleted, setOcrCompleted] = useState(false);
   const [log, setLog] = useState<string>("");
   const [ocrLines, setOcrLines] = useState<DvdOcrLine[]>([]);
+  const [ocrLinesByTrack, setOcrLinesByTrack] = useState<Record<string, DvdOcrLine[]>>({});
   const [selectedLineId, setSelectedLineId] = useState<number | null>(null);
+  const [selectedLineIdByTrack, setSelectedLineIdByTrack] = useState<Record<string, number>>({});
   const [selectedTrackKey, setSelectedTrackKey] = useState<string>("");
   const [ocrLanguage, setOcrLanguage] = useState("fra");
   const [ocrUpscaleFactor, setOcrUpscaleFactor] = useState<2 | 3>(3);
@@ -158,6 +168,14 @@ export function DvdSubtitleWindowPage() {
     total: number;
   }>({ processed: 0, total: 0 });
   const [loadingSubImages, setLoadingSubImages] = useState(false);
+  const [subImagesReadyByTrack, setSubImagesReadyByTrack] = useState<Record<string, boolean>>({});
+  const [subImagesBuildProgress, setSubImagesBuildProgress] = useState<{
+    done: number;
+    total: number;
+  }>({ done: 0, total: 0 });
+  const [ocrActiveTrackKey, setOcrActiveTrackKey] = useState<string | null>(null);
+  const [ocrDoneByTrack, setOcrDoneByTrack] = useState<Record<string, boolean>>({});
+  const [exportedSrtByTrack, setExportedSrtByTrack] = useState<Record<string, string>>({});
 
   const hasTracks = scanRows.length > 0;
   const hasInput = inputPaths.length > 0;
@@ -182,6 +200,34 @@ export function DvdSubtitleWindowPage() {
     const sum = ocrLines.reduce((acc, line) => acc + line.confidence, 0);
     return Math.round(sum / ocrLines.length);
   }, [ocrLines]);
+
+  const extractedTrackKeys = useMemo(
+    () =>
+      extractRows
+        .filter((row) => row.success)
+        .map((row) => trackKey(row.input_path, row.stream_index)),
+    [extractRows],
+  );
+
+  const ocrDoneCount = useMemo(
+    () => extractedTrackKeys.filter((key) => ocrDoneByTrack[key]).length,
+    [extractedTrackKeys, ocrDoneByTrack],
+  );
+
+  const exportedCount = useMemo(
+    () => extractedTrackKeys.filter((key) => Boolean(exportedSrtByTrack[key])).length,
+    [extractedTrackKeys, exportedSrtByTrack],
+  );
+
+  const canExportAllSrt = useMemo(
+    () => extractedTrackKeys.length > 0 && ocrDoneCount === extractedTrackKeys.length,
+    [extractedTrackKeys, ocrDoneCount],
+  );
+
+  const subImagesReadyCount = useMemo(
+    () => extractedTrackKeys.filter((key) => subImagesReadyByTrack[key]).length,
+    [extractedTrackKeys, subImagesReadyByTrack],
+  );
 
   const appendLog = useCallback((message: string) => {
     const at = new Date().toLocaleTimeString("fr-FR", {
@@ -309,7 +355,24 @@ export function DvdSubtitleWindowPage() {
       return;
     }
     setSelectedLineId(line.id);
+    if (selectedTrackKey) {
+      setSelectedLineIdByTrack((prev) => ({ ...prev, [selectedTrackKey]: line.id }));
+    }
     setManualText(unescapeNewlines(line.ocr_text));
+  }
+
+  function selectTrackAndShowLines(key: string) {
+    setSelectedTrackKey(key);
+    const cached = ocrLinesByTrack[key];
+    if (cached && cached.length > 0) {
+      setOcrLines(cached);
+      const preferredId = selectedLineIdByTrack[key] ?? null;
+      focusLine(pickLineToFocus(cached, preferredId));
+      return;
+    }
+    setOcrLines([]);
+    setSelectedLineId(null);
+    setManualText("");
   }
 
   function pickLineToFocus(lines: DvdOcrLine[], preferredId: number | null): DvdOcrLine | null {
@@ -385,6 +448,8 @@ export function DvdSubtitleWindowPage() {
     }
     setLoadingScan(true);
     setExtractRows([]);
+    setSubImagesReadyByTrack({});
+    setSubImagesBuildProgress({ done: 0, total: 0 });
     try {
       const rows = await scanDvdSubtitleTracks(inputPaths);
       setScanRows(rows);
@@ -407,6 +472,13 @@ export function DvdSubtitleWindowPage() {
     }
     setLoadingExtract(true);
     try {
+      setOcrDoneByTrack({});
+      setExportedSrtByTrack({});
+      setSubImagesReadyByTrack({});
+      setSubImagesBuildProgress({ done: 0, total: 0 });
+      setOcrLinesByTrack({});
+      setOcrLines([]);
+      setOcrCompleted(false);
       const rows = await extractDvdSubtitleTracks({
         input_paths: inputPaths,
         output_dir: outputDir.trim(),
@@ -419,28 +491,51 @@ export function DvdSubtitleWindowPage() {
         }),
       );
 
-      const preferred = selectedTrackKey
-        ? rows.find(
-          (row) =>
-            row.success &&
-            `${row.input_path}::${row.stream_index}` === selectedTrackKey,
-        )
-        : undefined;
-      const firstOk = preferred ?? rows.find((row) => row.success);
-      if (firstOk) {
+      const extractedByKey = new Map(
+        rows
+          .filter((row) => row.success)
+          .map((row) => [trackKey(row.input_path, row.stream_index), row] as const),
+      );
+      const tracksToPrepare = scanRows
+        .map((item) => extractedByKey.get(trackKey(item.input_path, item.stream_index)))
+        .filter((row): row is DvdSubtitleExtractResult => Boolean(row));
+
+      if (tracksToPrepare.length > 0) {
         setLoadingSubImages(true);
-        setOcrCompleted(false);
+        setSubImagesBuildProgress({ done: 0, total: tracksToPrepare.length });
+        appendLog(`Génération des images SUB pour ${tracksToPrepare.length} piste(s)...`);
+        const loadedByKey: Record<string, DvdOcrLine[]> = {};
         try {
-          const previousSelectedId = selectedLineId;
-          const loaded = await loadDvdSubImages({
-            idx_path: firstOk.idx_path,
-            output_dir: outputDir.trim(),
-            language: ocrLanguage,
-            ocr_upscale_factor: ocrUpscaleFactor,
-          });
-          setOcrLines(loaded.lines);
-          focusLine(pickLineToFocus(loaded.lines, previousSelectedId));
-          appendLog(`Images SUB chargées: ${loaded.lines.length} ligne(s)`);
+          let done = 0;
+          for (const row of tracksToPrepare) {
+            const key = trackKey(row.input_path, row.stream_index);
+            const loaded = await loadDvdSubImages({
+              idx_path: row.idx_path,
+              output_dir: outputDir.trim(),
+              language: ocrLanguage,
+              ocr_upscale_factor: ocrUpscaleFactor,
+            });
+            loadedByKey[key] = loaded.lines;
+            done += 1;
+            setSubImagesReadyByTrack((prev) => ({ ...prev, [key]: true }));
+            setSubImagesBuildProgress({ done, total: tracksToPrepare.length });
+            appendLog(`SUB généré piste ${row.stream_index} (${done}/${tracksToPrepare.length})`);
+          }
+
+          setOcrLinesByTrack(loadedByKey);
+          const preferred = selectedTrackKey
+            ? tracksToPrepare.find(
+              (row) => trackKey(row.input_path, row.stream_index) === selectedTrackKey,
+            )
+            : undefined;
+          const firstPrepared = preferred ?? tracksToPrepare[0];
+          if (firstPrepared) {
+            const firstKey = trackKey(firstPrepared.input_path, firstPrepared.stream_index);
+            const lines = loadedByKey[firstKey] ?? [];
+            setSelectedTrackKey(firstKey);
+            setOcrLines(lines);
+            focusLine(pickLineToFocus(lines, selectedLineId));
+          }
         } finally {
           setLoadingSubImages(false);
         }
@@ -453,7 +548,17 @@ export function DvdSubtitleWindowPage() {
   }
 
   useEffect(() => {
-    if (loadingExtract || loadingOcr) {
+    if (!selectedTrackKey) {
+      return;
+    }
+    const cached = ocrLinesByTrack[selectedTrackKey];
+    if (cached && cached.length > 0) {
+      setOcrLines(cached);
+      const preferredId = selectedLineIdByTrack[selectedTrackKey] ?? null;
+      focusLine(pickLineToFocus(cached, preferredId));
+      return;
+    }
+    if (loadingExtract || loadingOcr || loadingSubImages) {
       return;
     }
     const idxPath = pickDefaultIdxPath();
@@ -461,7 +566,7 @@ export function DvdSubtitleWindowPage() {
       return;
     }
     setLoadingSubImages(true);
-    const previousSelectedId = selectedLineId;
+    const previousSelectedId = selectedLineIdByTrack[selectedTrackKey] ?? selectedLineId;
     void loadDvdSubImages({
       idx_path: idxPath,
       output_dir: outputDir.trim(),
@@ -469,6 +574,7 @@ export function DvdSubtitleWindowPage() {
       ocr_upscale_factor: ocrUpscaleFactor,
     })
       .then((loaded) => {
+        setOcrLinesByTrack((prev) => ({ ...prev, [selectedTrackKey]: loaded.lines }));
         setOcrLines(loaded.lines);
         focusLine(pickLineToFocus(loaded.lines, previousSelectedId));
       })
@@ -479,7 +585,7 @@ export function DvdSubtitleWindowPage() {
         setLoadingSubImages(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTrackKey]);
+  }, [selectedTrackKey, ocrLinesByTrack, selectedLineIdByTrack, loadingExtract, loadingOcr, loadingSubImages]);
 
   function pickDefaultIdxPath(): string | null {
     if (selectedTrackKey) {
@@ -496,8 +602,16 @@ export function DvdSubtitleWindowPage() {
   }
 
   async function runOcr() {
-    const idxPath = pickDefaultIdxPath();
-    if (!idxPath) {
+    const extractedByKey = new Map(
+      extractRows
+        .filter((row) => row.success)
+        .map((row) => [trackKey(row.input_path, row.stream_index), row] as const),
+    );
+    const tracksToProcess = scanRows
+      .map((item) => extractedByKey.get(trackKey(item.input_path, item.stream_index)))
+      .filter((row): row is DvdSubtitleExtractResult => Boolean(row));
+
+    if (tracksToProcess.length === 0) {
       appendLog("Aucun IDX extrait disponible pour OCR");
       return;
     }
@@ -507,112 +621,194 @@ export function DvdSubtitleWindowPage() {
     }
     setLoadingOcr(true);
     setOcrCompleted(false);
+    setOcrActiveTrackKey(null);
     setOcrProgress({ processed: 0, total: 0 });
     try {
-      const result = await startDvdOcr({
-        idx_path: idxPath,
-        output_dir: outputDir.trim(),
-        language: ocrLanguage,
-        ocr_upscale_factor: ocrUpscaleFactor,
-      });
-      setOcrLines(result.lines);
-      const firstNeeds =
-        result.lines.find((l) => l.needs_manual) ?? result.lines[0];
-      focusLine(firstNeeds ?? null);
+      let completed = 0;
+      for (const row of tracksToProcess) {
+        const key = trackKey(row.input_path, row.stream_index);
+        setOcrActiveTrackKey(key);
+        setSelectedTrackKey(key);
+        appendLog(`OCR piste ${row.stream_index} (${row.input_path.split("\\").pop()})...`);
+
+        const result = await startDvdOcr({
+          idx_path: row.idx_path,
+          output_dir: outputDir.trim(),
+          language: ocrLanguage,
+          ocr_upscale_factor: ocrUpscaleFactor,
+        });
+        setOcrLinesByTrack((prev) => ({ ...prev, [key]: result.lines }));
+        setOcrDoneByTrack((prev) => ({ ...prev, [key]: true }));
+        setOcrLines(result.lines);
+        const firstNeeds =
+          result.lines.find((l) => l.needs_manual) ?? result.lines[0];
+        focusLine(firstNeeds ?? null);
+        completed += 1;
+        appendLog(`OCR terminé piste ${row.stream_index} (${completed}/${tracksToProcess.length})`);
+      }
       setOcrCompleted(true);
-      appendLog(`OCR terminé: ${result.lines.length} image(s)`);
+      appendLog(`OCR terminé sur ${tracksToProcess.length} piste(s)`);
     } catch (error) {
       appendLog(`Erreur OCR: ${String(error)}`);
     } finally {
+      setOcrActiveTrackKey(null);
       setLoadingOcr(false);
     }
   }
 
   function applyManual() {
     if (!selectedLine) return;
+    const originalText = selectedLine.ocr_text.trim();
     const text = manualText.trim();
 
-    // Record correction and auto-learn
-    if (selectedLine.ocr_text !== text) {
-      void recordOcrCorrection(selectedLine.ocr_text, text)
+    // Persist explicit replacement and then auto-learn additional patterns.
+    if (originalText !== text) {
+      void upsertOcrUserReplacement(originalText, text)
+        .then(() => recordOcrCorrection(originalText, text))
         .then(() => {
-          appendLog(`Auto-apprentissage: correction enregistrée pour ligne #${selectedLine.id}`);
+          appendLog(`Correction enregistrée pour ligne #${selectedLine.id}`);
         })
         .catch((error) => {
-          appendLog(`Erreur auto-apprentissage: ${String(error)}`);
+          appendLog(`Erreur enregistrement correction: ${String(error)}`);
         });
     }
 
-    setOcrLines((prev) =>
-      prev.map((line) =>
-        line.id === selectedLine.id ? withUpdatedFlags(line, text) : line,
-      ),
+    const updatedLines = ocrLines.map((line) =>
+      line.id === selectedLine.id ? withUpdatedFlags(line, text) : line,
     );
+    setOcrLines(updatedLines);
+    if (selectedTrackKey) {
+      setOcrLinesByTrack((prev) => ({ ...prev, [selectedTrackKey]: updatedLines }));
+    }
     const updatedLine = withUpdatedFlags(selectedLine, text);
     focusLine(updatedLine);
   }
 
   async function exportSrt() {
-    if (ocrLines.length === 0) {
-      appendLog("Aucune ligne OCR à exporter");
+    const extractedByKey = new Map(
+      extractRows
+        .filter((row) => row.success)
+        .map((row) => [trackKey(row.input_path, row.stream_index), row] as const),
+    );
+    const tracksToExport = scanRows
+      .map((item) => extractedByKey.get(trackKey(item.input_path, item.stream_index)))
+      .filter((row): row is DvdSubtitleExtractResult => Boolean(row))
+      .map((row) => {
+        const key = trackKey(row.input_path, row.stream_index);
+        return { row, key, lines: ocrLinesByTrack[key] ?? [] };
+      })
+      .filter(({ lines }) => lines.length > 0);
+
+    if (tracksToExport.length === 0) {
+      appendLog("Aucune piste OCR à exporter");
       return;
     }
     if (!outputDir.trim()) {
       appendLog(t("dvd.log.noOutput"));
       return;
     }
-    const idxPath = pickDefaultIdxPath();
-    if (!idxPath) {
-      appendLog("Aucun IDX extrait disponible");
-      return;
-    }
-    // Extraire le nom de base du fichier idx
-    const basename = idxPath.split("\\").pop()?.replace(".idx", "") || "dvd_ocr";
-    const outPath = `${outputDir.trim()}\\${basename}.srt`;
+
     try {
-      const written = await exportDvdOcrSrt({
-        output_srt_path: outPath,
-        lines: ocrLines,
-      });
-      appendLog(`SRT exporté: ${written}`);
+      const srtByInputPath: Record<string, string> = {};
+      let lastOutPath: string | undefined;
+
+      for (const { row, lines } of tracksToExport) {
+        const idxPath = row.idx_path;
+        const basename = idxPath.split("\\").pop()?.replace(".idx", "") || "dvd_ocr";
+        const outPath = `${outputDir.trim()}\\${basename}.srt`;
+        const written = await exportDvdOcrSrt({
+          output_srt_path: outPath,
+          lines,
+        });
+        srtByInputPath[row.input_path] = outPath;
+        lastOutPath = outPath;
+        setExportedSrtByTrack((prev) => ({
+          ...prev,
+          [trackKey(row.input_path, row.stream_index)]: outPath,
+        }));
+        appendLog(`SRT exporté: ${written}`);
+      }
+
+      if (!lastOutPath) {
+        appendLog("Aucun SRT généré");
+        return;
+      }
+
+      // Lire le contexte directement du localStorage (pas du state)
+      const currentContext = readStoredContext();
+      const previewWindowLabel = currentContext?.previewWindowLabel;
 
       // Sauvegarder le chemin du SRT dans le contexte Preview
-      if (dvdSubsContext?.previewWindowLabel) {
+      if (previewWindowLabel) {
+        appendLog(`Détecté preview window: ${previewWindowLabel}`);
+
         // Mettre à jour AUSSI le contexte Preview directement (important!)
         const previewRaw = localStorage.getItem("animegui-preview-context");
         if (previewRaw) {
           try {
             const previewContext = JSON.parse(previewRaw);
-            previewContext.srtPath = outPath;
+            previewContext.srtPath = lastOutPath;
+            previewContext.srtByInputPath = {
+              ...(previewContext.srtByInputPath ?? {}),
+              ...srtByInputPath,
+            };
             localStorage.setItem("animegui-preview-context", JSON.stringify(previewContext));
-            appendLog(`SRT path sauvegardé dans preview-context: ${outPath}`);
+            appendLog(`Mappings SRT sauvegardés dans preview-context (${Object.keys(srtByInputPath).length})`);
           } catch {
             appendLog("Erreur mise à jour preview-context");
           }
         }
 
         const updatedContext = {
-          ...dvdSubsContext,
-          srtPath: outPath,
+          ...currentContext,
+          srtPath: lastOutPath,
+          srtByInputPath: {
+            ...(currentContext.srtByInputPath ?? {}),
+            ...srtByInputPath,
+          },
         };
         localStorage.setItem(
           "animegui-dvdsubs-context",
           JSON.stringify(updatedContext),
         );
 
-        // Fermer la fenêtre DVD
-        await appWindow.close();
+        // Attendre un peu pour que le localStorage se propage
+        await new Promise(resolve => setTimeout(resolve, 200));
 
-        // Réafficher la fenêtre Preview
+        // IMPORTANT: D'abord montrer la Preview, puis fermer la DVD
         try {
-          const previewWindow = await WebviewWindow.getByLabel(dvdSubsContext.previewWindowLabel);
+          for (const [inputPath, srtPath] of Object.entries(srtByInputPath)) {
+            await appWindow.emitTo(previewWindowLabel, "dvd-srt-exported", {
+              srtPath,
+              inputPath,
+            });
+          }
+          appendLog(`Recherche fenêtre preview: ${previewWindowLabel}...`);
+          const previewWindow = await WebviewWindow.getByLabel(previewWindowLabel);
           if (previewWindow) {
+            appendLog(`✅ Fenêtre preview trouvée, affichage...`);
+            await previewWindow.unminimize();
             await previewWindow.show();
             await previewWindow.setFocus();
+            appendLog(`✅ Fenêtre preview affichée avec succès`);
+          } else {
+            appendLog(`❌ Fenêtre preview introuvable avec le label: ${previewWindowLabel}`);
           }
-        } catch {
-          // ignore if preview window not found
+        } catch (error) {
+          appendLog(`❌ Erreur affichage preview: ${String(error)}`);
         }
+
+        // Maintenant seulement fermer la fenêtre DVD
+        try {
+          appendLog(`Fermeture fenêtre DVD...`);
+          await new Promise(resolve => setTimeout(resolve, 100));
+          await appWindow.hide();
+          appendLog(`Fenêtre DVD fermée`);
+        } catch (error) {
+          appendLog(`Erreur fermeture DVD: ${String(error)}`);
+        }
+      } else {
+        appendLog(`previewWindowLabel non trouvé dans le contexte`);
       }
     } catch (error) {
       appendLog(`Erreur export SRT: ${String(error)}`);
@@ -682,19 +878,38 @@ export function DvdSubtitleWindowPage() {
             className="dvdx-btn dvdx-btn-green"
             type="button"
             onClick={runOcr}
-            disabled={loadingOcr || loadingSubImages || extractOkCount === 0}
+            disabled={
+              loadingOcr
+              || loadingSubImages
+              || extractOkCount === 0
+              || subImagesReadyCount < extractedTrackKeys.length
+            }
           >
-            {loadingOcr ? "OCR..." : "Start OCR"}
+            {loadingOcr ? "OCR..." : "Start OCR (toutes les pistes)"}
           </button>
           {ocrCompleted && (
             <button
               className="dvdx-btn dvdx-btn-sec"
               type="button"
               onClick={exportSrt}
+              disabled={!canExportAllSrt}
             >
-              Exporter SRT
+              Exporter SRT (toutes les pistes)
             </button>
           )}
+          {!canExportAllSrt && extractOkCount > 0 ? (
+            <span className="dvdx-flow-hint">
+              {t("dvd.flowHint", { done: ocrDoneCount, total: extractedTrackKeys.length })}
+            </span>
+          ) : null}
+          {loadingSubImages ? (
+            <span className="dvdx-flow-hint">
+              {t("dvd.subBuildHint", {
+                done: subImagesBuildProgress.done,
+                total: subImagesBuildProgress.total,
+              })}
+            </span>
+          ) : null}
           <div className="dvdx-sep-v" />
           <select
             className="dvdx-select"
@@ -730,13 +945,38 @@ export function DvdSubtitleWindowPage() {
                       row.stream_index === item.stream_index,
                   );
                   const isActive = selectedTrackKey === key;
-                  const status = loadingOcr && isActive ? "ocr" : extracted ? "ok" : "idle";
+                  const status = (() => {
+                    if (exportedSrtByTrack[key]) return "exported";
+                    if (loadingOcr && ocrActiveTrackKey === key) return "ocr";
+                    if (ocrDoneByTrack[key]) return "ocrdone";
+                    if (subImagesReadyByTrack[key]) return "subready";
+                    if (extracted) return "extracted";
+                    return "idle";
+                  })();
+                  const statusLabel = (() => {
+                    if (status === "exported") return t("dvd.statusExported");
+                    if (status === "ocr") return t("dvd.statusOcring");
+                    if (status === "ocrdone") return t("dvd.statusOcrDone");
+                    if (status === "subready") return t("dvd.statusSubReady");
+                    if (status === "extracted") return t("dvd.statusExtracted");
+                    return t("dvd.statusIdle");
+                  })();
+                  const progressValue = (() => {
+                    if (status === "exported") return 100;
+                    if (status === "ocrdone") return 85;
+                    if (status === "subready") return 60;
+                    if (status === "extracted") return 35;
+                    if (status === "ocr" && ocrActiveTrackKey === key && ocrProgress.total > 0) {
+                      return 60 + Math.round((ocrProgress.processed / ocrProgress.total) * 25);
+                    }
+                    return 0;
+                  })();
                   return (
                     <button
                       type="button"
                       key={key}
-                      className={`dvdx-piste-item ${isActive ? "active" : ""}`}
-                      onClick={() => setSelectedTrackKey(key)}
+                      className={`dvdx-piste-item ${isActive ? "active" : ""} ${status === "ocr" ? "is-processing" : ""}`}
+                      onClick={() => selectTrackAndShowLines(key)}
                     >
                       <div className="dvdx-pi-top">
                         <span className="dvdx-pi-idx">S:{item.stream_index}</span>
@@ -749,13 +989,14 @@ export function DvdSubtitleWindowPage() {
                       <div className="dvdx-pi-status">
                         <span className={`dvdx-pi-dot ${status}`} />
                         <span className={`dvdx-pi-stxt ${status}`}>
-                          {status === "ocr"
-                            ? "OCR en cours..."
-                            : status === "ok"
-                              ? "IDX/SUB extrait"
-                              : "En attente"}
+                          {statusLabel}
                         </span>
                       </div>
+                      <Progress
+                        value={progressValue}
+                        className="dvdx-pi-progress"
+                        indicatorClassName={`dvdx-pi-progress-indicator ${status}`}
+                      />
                     </button>
                   );
                 })
@@ -914,6 +1155,14 @@ export function DvdSubtitleWindowPage() {
         <div className="dvdx-stat">
           <span className="dvdx-stat-lbl">Lignes OCR</span>
           <span className="dvdx-stat-val">{ocrLines.length}</span>
+        </div>
+        <div className="dvdx-stat">
+          <span className="dvdx-stat-lbl">OCR pistes</span>
+          <span className="dvdx-stat-val gold">{ocrDoneCount}/{extractOkCount}</span>
+        </div>
+        <div className="dvdx-stat">
+          <span className="dvdx-stat-lbl">SRT exportés</span>
+          <span className="dvdx-stat-val green">{exportedCount}/{extractOkCount}</span>
         </div>
         <div className="dvdx-stat">
           <span className="dvdx-stat-lbl">A corriger</span>

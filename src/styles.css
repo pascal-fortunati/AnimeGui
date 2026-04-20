@@ -2318,6 +2318,29 @@ h1 {
   border: 1px solid rgb(56 200 232 / 28%);
 }
 
+.job-subs-badge {
+  text-transform: none;
+  letter-spacing: 0.2px;
+}
+
+.job-subs-badge--external {
+  background: rgb(76 187 110 / 12%);
+  color: var(--green);
+  border: 1px solid rgb(76 187 110 / 30%);
+}
+
+.job-subs-badge--source {
+  background: rgb(56 200 232 / 10%);
+  color: var(--cyan);
+  border: 1px solid rgb(56 200 232 / 28%);
+}
+
+.job-subs-badge--none {
+  background: rgb(255 95 95 / 12%);
+  color: var(--red);
+  border: 1px solid rgb(255 95 95 / 30%);
+}
+
 /* ── Row 2: stats ────────────────────────────────────── */
 
 .job-stats {
@@ -3292,6 +3315,11 @@ h1 {
   border-color: var(--border-hi);
 }
 
+.dvdx-piste-item.is-processing {
+  animation: dvdx-track-pulse 1.35s ease-in-out infinite;
+  box-shadow: inset 0 0 0 1px rgb(232 160 32 / 26%);
+}
+
 .dvdx-pi-top {
   display: flex;
   align-items: center;
@@ -3335,6 +3363,33 @@ h1 {
   gap: 4px;
 }
 
+.dvdx-pi-progress {
+  margin-top: 3px;
+  height: 3px;
+  background: var(--bg-5);
+}
+
+.dvdx-pi-progress-indicator.idle {
+  background: linear-gradient(90deg, var(--border-hi), var(--border-hi));
+}
+
+.dvdx-pi-progress-indicator.extracted {
+  background: linear-gradient(90deg, #4f8cff, #79a8ff);
+}
+
+.dvdx-pi-progress-indicator.subready {
+  background: linear-gradient(90deg, #25c9d0, #58d8de);
+}
+
+.dvdx-pi-progress-indicator.ocr,
+.dvdx-pi-progress-indicator.ocrdone {
+  background: linear-gradient(90deg, var(--gold-dim), var(--gold-bright));
+}
+
+.dvdx-pi-progress-indicator.exported {
+  background: linear-gradient(90deg, #4fbd6f, #67d890);
+}
+
 .dvdx-pi-dot {
   width: 5px;
   height: 5px;
@@ -3350,6 +3405,22 @@ h1 {
   background: var(--gold);
 }
 
+.dvdx-pi-dot.extracted {
+  background: var(--blue, #4f8cff);
+}
+
+.dvdx-pi-dot.subready {
+  background: #25c9d0;
+}
+
+.dvdx-pi-dot.ocrdone {
+  background: var(--green);
+}
+
+.dvdx-pi-dot.exported {
+  background: #67d890;
+}
+
 .dvdx-pi-stxt {
   font-size: 10px;
   color: var(--text-3);
@@ -3361,6 +3432,32 @@ h1 {
 
 .dvdx-pi-stxt.ocr {
   color: var(--gold);
+}
+
+.dvdx-pi-stxt.extracted {
+  color: var(--blue, #4f8cff);
+}
+
+.dvdx-pi-stxt.subready {
+  color: #25c9d0;
+}
+
+.dvdx-pi-stxt.ocrdone {
+  color: var(--green);
+}
+
+.dvdx-pi-stxt.exported {
+  color: #67d890;
+}
+
+.dvdx-flow-hint {
+  font-size: 11px;
+  color: var(--text-2);
+  padding: 3px 8px;
+  border: 1px solid var(--border-0);
+  border-radius: 999px;
+  background: rgb(79 140 255 / 8%);
+  white-space: nowrap;
 }
 
 .dvdx-ocr-topbar {
@@ -3799,6 +3896,20 @@ h1 {
 
   100% {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes dvdx-track-pulse {
+  0% {
+    box-shadow: inset 0 0 0 1px rgb(232 160 32 / 18%), 0 0 0 0 rgb(232 160 32 / 0%);
+  }
+
+  50% {
+    box-shadow: inset 0 0 0 1px rgb(232 160 32 / 42%), 0 0 0 3px rgb(232 160 32 / 8%);
+  }
+
+  100% {
+    box-shadow: inset 0 0 0 1px rgb(232 160 32 / 18%), 0 0 0 0 rgb(232 160 32 / 0%);
   }
 }
 

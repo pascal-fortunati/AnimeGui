@@ -82,6 +82,27 @@ impl Default for SpuState {
     }
 }
 
+fn extract_spu_display_times(packet: &[u8]) -> (Option<u64>, Option<u64>) {
+    if packet.len() < 6 {
+        return (None, None);
+    }
+    let packet_size = u16::from_be_bytes([packet[0], packet[1]]) as usize;
+    if packet_size > packet.len() {
+        return (None, None);
+    }
+    let ctrl_offset = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+    if ctrl_offset >= packet_size {
+        return (None, None);
+    }
+
+    let mut state = SpuState::default();
+    if parse_spu_control_sequences(&packet[..packet_size], ctrl_offset, &mut state).is_err() {
+        return (None, None);
+    }
+
+    (state.start_display_ms, state.stop_display_ms)
+}
+
 pub fn decode_idx_sub_to_png_cues(
     idx_path: &Path,
     max_images: Option<usize>,
@@ -126,6 +147,9 @@ pub fn decode_idx_sub_to_png_cues(
             continue;
         };
 
+        // Parse display timings from SPU control commands when present.
+        let (spu_start_rel_ms, spu_stop_rel_ms) = extract_spu_display_times(&packet);
+
         // Décode le SPU avec fallback gracieux si erreur
         let decoded = match decode_spu_packet(&packet, &info.palette) {
             Ok(d) => d,
@@ -141,9 +165,29 @@ pub fn decode_idx_sub_to_png_cues(
             }
         };
 
-        // Utilise les timestamps du contrôle SPU si disponibles, sinon les timestamps IDX
-        let start_ms_actual = current.start_ms;
-        let end_ms_actual = default_end_ms;
+        // Use SPU display timings when available; otherwise keep IDX fallback.
+        let start_ms_actual = current
+            .start_ms
+            .saturating_add(spu_start_rel_ms.unwrap_or(0));
+        let mut end_ms_actual = if let Some(stop_rel_ms) = spu_stop_rel_ms {
+            current.start_ms.saturating_add(stop_rel_ms)
+        } else {
+            default_end_ms
+        };
+
+        // Keep sane durations and avoid overlap with next subtitle start.
+        if end_ms_actual <= start_ms_actual {
+            end_ms_actual = start_ms_actual.saturating_add(1500);
+        }
+        if idx + 1 < entries.len() {
+            let next_start = entries[idx + 1].start_ms;
+            if end_ms_actual >= next_start {
+                end_ms_actual = next_start.saturating_sub(1);
+            }
+        }
+        if end_ms_actual <= start_ms_actual {
+            end_ms_actual = start_ms_actual.saturating_add(500);
+        }
 
         let (ocr_w, ocr_h, ocr_rgb) = preprocess_for_ocr(&decoded, ocr_upscale_factor);
         let ocr_png = encode_png_rgb(ocr_w, ocr_h, &ocr_rgb)?;

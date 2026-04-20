@@ -21,4 +21,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 png = "0.17"
 
 [profile.dev]
-incremental = false
+incremental = true

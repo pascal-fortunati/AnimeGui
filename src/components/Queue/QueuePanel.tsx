@@ -29,12 +29,12 @@ function ratio(current: number, total: number): number {
 
 function statusIcon(status: QueueJob["status"]): string {
   switch (status) {
-    case "done":       return "check_circle";
+    case "done": return "check_circle";
     case "processing": return "sync";
-    case "paused":     return "pause_circle";
-    case "error":      return "error";
-    case "canceled":   return "cancel";
-    default:           return "radio_button_unchecked";
+    case "paused": return "pause_circle";
+    case "error": return "error";
+    case "canceled": return "cancel";
+    default: return "radio_button_unchecked";
   }
 }
 
@@ -93,9 +93,9 @@ export function QueuePanel({
   const canCancel = (status: QueueJob["status"]) =>
     status === "waiting" || status === "processing" || status === "paused";
 
-  const activeCount  = jobs.filter(j => j.status === "processing" || j.status === "paused").length;
+  const activeCount = jobs.filter(j => j.status === "processing" || j.status === "paused").length;
   const waitingCount = jobs.filter(j => j.status === "waiting").length;
-  const doneCount    = jobs.filter(j => j.status === "done").length;
+  const doneCount = jobs.filter(j => j.status === "done").length;
   const canceledCount = jobs.filter(j => j.status === "canceled").length;
   const [queueTab, setQueueTab] = useState<"active" | "waiting" | "done" | "canceled">("waiting");
 
@@ -182,18 +182,33 @@ export function QueuePanel({
         )}
 
         {visibleJobs.map((job) => {
-          const sid        = job.settings.preview_session_id;
-          const batchSize  = sid ? (batchCount.get(sid) ?? 0) : 0;
+          const sid = job.settings.preview_session_id;
+          const batchSize = sid ? (batchCount.get(sid) ?? 0) : 0;
           const isBatchOwn = sid ? batchOwner.get(sid) === job.id : false;
-          const showApply  = !sid || batchSize <= 1 || isBatchOwn;
+          const showApply = !sid || batchSize <= 1 || isBatchOwn;
           const hasExtract = job.extract_total > 0;
           const hasUpscale = job.upscale_total > 0;
-          const isActive   = job.status === "processing";
-          const isCompact  = queueTab === "waiting" || job.status === "waiting";
+          const isActive = job.status === "processing";
+          const isCompact = queueTab === "waiting" || job.status === "waiting";
           const showStages = queueTab === "active" ? true : (hasExtract || hasUpscale || isActive);
           const fpsLabel = job.fps > 0 ? `${job.fps.toFixed(2)} fps IA` : "-- fps IA";
           const etaRaw = etaLabel(job.eta_seconds);
           const etaDisplay = etaRaw.length > 0 ? `ETA ${etaRaw}` : "ETA --";
+          const hasExternalSrt =
+            typeof job.settings.external_srt_path === "string"
+            && job.settings.external_srt_path.trim().length > 0;
+          const subtitleBadgeClass = hasExternalSrt
+            ? "job-subs-badge job-subs-badge--external"
+            : job.settings.copy_subs
+              ? "job-subs-badge job-subs-badge--source"
+              : "job-subs-badge job-subs-badge--none";
+          const subtitleBadgeLabel = hasExternalSrt
+            ? t("queue.subsExternal", {
+              file: basename(job.settings.external_srt_path as string),
+            })
+            : job.settings.copy_subs
+              ? t("queue.subsSource")
+              : t("queue.subsNone");
 
           return (
             <div
@@ -228,6 +243,13 @@ export function QueuePanel({
                         {t("queue.batch", { count: batchSize })}
                       </span>
                     )}
+                    <span
+                      className={`status-badge ${subtitleBadgeClass}`}
+                      title={hasExternalSrt ? (job.settings.external_srt_path as string) : subtitleBadgeLabel}
+                    >
+                      <span className="material-icons-round status-icon">subtitles</span>
+                      {subtitleBadgeLabel}
+                    </span>
                   </div>
                 </div>
 
